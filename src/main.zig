@@ -1,8 +1,15 @@
 const std = @import("std");
 const stdout = std.io.getStdOut().writer();
-const allocator = std.heap.page_allocator;
+
+const DecodedBencode = union(enum) {
+    String: []const u8,
+    Int: i64,
+};
 
 pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -15,28 +22,34 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "decode")) {
         std.debug.print("Logs from your program will appear here\n", .{});
-
         const encodedStr = args[2];
-        const decodedStr = decodeBencode(encodedStr) catch {
-            try stdout.print("Invalid encoded value\n", .{});
-            std.process.exit(1);
-        };
-        var string = std.ArrayList(u8).init(allocator);
-        try std.json.stringify(decodedStr.*, .{}, string.writer());
-        const jsonStr = try string.toOwnedSlice();
-        try stdout.print("{s}\n", .{jsonStr});
+        const decoded = try decodeBencode(encodedStr);
+        switch (decoded) {
+            .String => |decodedStr| {
+                var string = std.ArrayList(u8).init(allocator);
+                try std.json.stringify(decodedStr, .{}, string.writer());
+                const jsonStr = try string.toOwnedSlice();
+                defer allocator.free(jsonStr);
+                try stdout.print("{s}\n", .{jsonStr});
+            },
+            .Int => |decodedInt| {
+                try stdout.print("{d}\n", .{decodedInt});
+            },
+        }
     }
 }
 
-fn decodeBencode(encodedValue: []const u8) !*const []const u8 {
+fn decodeBencode(encodedValue: []const u8) !DecodedBencode {
     if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
         const firstColon = std.mem.indexOf(u8, encodedValue, ":");
         if (firstColon == null) {
             return error.InvalidArgument;
         }
-        return &encodedValue[firstColon.? + 1 ..];
+        return .{ .String = encodedValue[firstColon.? + 1 ..] };
+    } else if (encodedValue[0] == 'i') {
+        return .{ .Int = try std.fmt.parseInt(i64, encodedValue[1 .. encodedValue.len - 1], 10) };
     } else {
-        try stdout.print("Only strings are supported at the moment\n", .{});
+        try stdout.print("Not Supported data type.\n", .{});
         std.process.exit(1);
     }
 }
