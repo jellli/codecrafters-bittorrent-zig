@@ -3,11 +3,11 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const stdout = std.io.getStdOut().writer();
 
-const BencodeValue = union(enum) {
-    String: []const u8,
-    Int: i64,
-    Array: []BencodeValue,
+const Dict = struct {
+    key: []const u8,
+    value: []BencodeValue,
 };
+const BencodeValue = union(enum) { String: []const u8, Int: i64, Array: []BencodeValue, Dict: []Dict };
 pub const BencodeDecoder = struct {
     allocator: Allocator,
     decoded: []BencodeValue,
@@ -58,6 +58,22 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
                 try buffer.append(.{ .Array = decoded.values });
                 i += decoded.bytes_consumed + 1;
             },
+            'd' => {
+                const str = undecoded_slice[1..];
+                const decoded = try decodeBencode(allocator, str);
+                defer allocator.free(decoded.values);
+                var dict_buffer = std.ArrayList(Dict).init(allocator);
+                defer dict_buffer.deinit();
+                var j: usize = 0;
+                while (j < decoded.values.len) : (j += 2) {
+                    try dict_buffer.append(.{
+                        .key = decoded.values[j].String,
+                        .value = try allocator.dupe(BencodeValue, decoded.values[j + 1 .. j + 2]),
+                    });
+                }
+                try buffer.append(.{ .Dict = try allocator.dupe(Dict, dict_buffer.items) });
+                i += decoded.bytes_consumed + 1;
+            },
             'e' => {
                 i += 1;
                 break;
@@ -80,6 +96,13 @@ fn freeBencodeValues(allocator: Allocator, list: []BencodeValue) void {
             freeBencodeValues(allocator, item.Array);
             allocator.free(item.Array);
         },
+        .Dict => {
+            for (item.Dict) |dict| {
+                freeBencodeValues(allocator, dict.value);
+                allocator.free(dict.value);
+            }
+            allocator.free(item.Dict);
+        },
         else => {},
     };
 }
@@ -96,6 +119,18 @@ fn formatBencodeValues(allocator: Allocator, list: []BencodeValue) ![]const u8 {
                 const fmt = try formatBencodeValues(allocator, inner_items);
                 defer allocator.free(fmt);
                 try writer.print("[{s}]", .{fmt});
+            },
+            .Dict => |dict_list| {
+                try writer.writeByte('{');
+                for (dict_list, 0..) |dict, i| {
+                    const fmt = try formatBencodeValues(allocator, dict.value);
+                    defer allocator.free(fmt);
+                    try writer.print("\"{s}\":{s}", .{ dict.key, fmt });
+                    if (i != dict_list.len - 1) {
+                        try writer.writeByte(',');
+                    }
+                }
+                try writer.writeByte('}');
             },
         }
         if (index != list.len - 1) {
@@ -150,4 +185,27 @@ test "should decode array" {
     try testing.expectEqualStrings("[]", fmt_1);
     try testing.expectEqualStrings("[\"grape\",935]", fmt_2);
     try testing.expectEqualStrings("[[972,\"blueberry\"]]", fmt_3);
+}
+
+test "should decode dict" {
+    const allocator = testing.allocator;
+    const str_1 = "de";
+    const str_2 = "d5:grapei935ee";
+    // const str_3 = "dryee";
+    var decoded_1 = try BencodeDecoder.initFromEncoded(allocator, str_1);
+    var decoded_2 = try BencodeDecoder.initFromEncoded(allocator, str_2);
+    // var decoded_3 = try BencodeDecoder.initFromEncoded(allocator, str_3);
+    defer decoded_1.deinit();
+    defer decoded_2.deinit();
+    // defer decoded_3.deinit();
+
+    const fmt_1 = try formatBencodeValues(allocator, decoded_1.decoded);
+    const fmt_2 = try formatBencodeValues(allocator, decoded_2.decoded);
+    // const fmt_3 = try formatBencodeValues(allocator, decoded_3.decoded);
+    defer allocator.free(fmt_1);
+    defer allocator.free(fmt_2);
+    // defer allocator.free(fmt_3);
+    try testing.expectEqualStrings("{}", fmt_1);
+    try testing.expectEqualStrings("{\"grape\":935}", fmt_2);
+    // try testing.expectEqualStrings("[[972,\"blueberry\"]]", fmt_3);
 }
