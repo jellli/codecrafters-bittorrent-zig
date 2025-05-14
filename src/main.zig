@@ -1,10 +1,8 @@
 const std = @import("std");
+const testing = std.testing;
+const Allocator = std.mem.Allocator;
 const stdout = std.io.getStdOut().writer();
-
-const DecodedBencode = union(enum) {
-    String: []const u8,
-    Int: i64,
-};
+const Bencode = @import("Bencode.zig").Bencode;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -22,34 +20,43 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "decode")) {
         std.debug.print("Logs from your program will appear here\n", .{});
-        const encodedStr = args[2];
-        const decoded = try decodeBencode(encodedStr);
-        switch (decoded) {
-            .String => |decodedStr| {
-                var string = std.ArrayList(u8).init(allocator);
-                try std.json.stringify(decodedStr, .{}, string.writer());
-                const jsonStr = try string.toOwnedSlice();
-                defer allocator.free(jsonStr);
-                try stdout.print("{s}\n", .{jsonStr});
-            },
-            .Int => |decodedInt| {
-                try stdout.print("{d}\n", .{decodedInt});
-            },
-        }
+        const encodedStr = try allocator.dupe(u8, args[2]);
+        defer allocator.free(encodedStr);
+        var bencode = try Bencode.initFromEncoded(allocator, encodedStr);
+        defer bencode.deinit();
+
+        try bencode.printDecoded();
     }
 }
 
-fn decodeBencode(encodedValue: []const u8) !DecodedBencode {
-    if (encodedValue[0] >= '0' and encodedValue[0] <= '9') {
-        const firstColon = std.mem.indexOf(u8, encodedValue, ":");
-        if (firstColon == null) {
-            return error.InvalidArgument;
-        }
-        return .{ .String = encodedValue[firstColon.? + 1 ..] };
-    } else if (encodedValue[0] == 'i') {
-        return .{ .Int = try std.fmt.parseInt(i64, encodedValue[1 .. encodedValue.len - 1], 10) };
-    } else {
-        try stdout.print("Not Supported data type.\n", .{});
-        std.process.exit(1);
-    }
-}
+// test "123" {
+//     const str_1 = "5:mangoi10230e";
+//     const decoded = try decodeBencode(testing.allocator, str_1);
+//     defer decoded.deinit();
+//
+//     std.debug.print("{any}", .{decoded.items});
+// }
+
+// test "should match right terminator" {
+//     const str_1 = "i10230e";
+//     const str_2 = "l5:mongoi-52ee";
+//     const str_3 = "li-52e";
+//     try testing.expect(try findMatchingTerminator(str_1[1..]) == 5);
+//     try testing.expect(try findMatchingTerminator(str_2[1..]) == 12);
+//     try testing.expect(try findMatchingTerminator(str_2[9..]) == 3);
+//     try testing.expectError(error.NoMatchingTerminator, findMatchingTerminator(str_3[1..]));
+// }
+//
+// test "should decode string" {
+//     const allocator = testing.allocator;
+//     const str_1: []u8 = try allocator.dupe(u8, "5:mango");
+//     const str_2: []u8 = try allocator.dupe(u8, "9:blueberryi29e");
+//     defer allocator.free(str_1);
+//     defer allocator.free(str_2);
+//     const expected_1 = DecodedBencode{ .String = "mango" };
+//     const actual_1 = try decodeBencode(str_1);
+//     const expected_2 = DecodedBencode{ .String = "blueberry" };
+//     const actual_2 = try decodeBencode(str_2);
+//     try testing.expectEqualStrings(expected_1.String, actual_1.String);
+//     try testing.expectEqualStrings(expected_2.String, actual_2.String);
+// }
