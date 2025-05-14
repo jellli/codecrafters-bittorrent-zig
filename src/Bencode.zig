@@ -9,9 +9,9 @@ pub const Bencode = struct {
 
     pub fn initFromEncoded(allocator: Allocator, encoded: []const u8) !Bencode {
         const decoded = try decodeBencode(allocator, encoded);
-        defer decoded.deinit();
+        defer allocator.free(decoded.list);
 
-        return .{ .allocator = allocator, .decoded = try allocator.dupe(DecodedBencode, decoded.items) };
+        return .{ .allocator = allocator, .decoded = try allocator.dupe(DecodedBencode, decoded.list) };
     }
 
     pub fn printDecoded(self: *Bencode) !void {
@@ -21,6 +21,7 @@ pub const Bencode = struct {
     }
 
     pub fn deinit(self: *Bencode) void {
+        freeArray(self.allocator, self.decoded);
         self.allocator.free(self.decoded);
     }
 };
@@ -30,6 +31,16 @@ const DecodedBencode = union(enum) {
     Int: i64,
     Array: []DecodedBencode,
 };
+
+fn freeArray(allocator: Allocator, list: []DecodedBencode) void {
+    for (list) |item| switch (item) {
+        .Array => {
+            freeArray(allocator, item.Array);
+            allocator.free(item.Array);
+        },
+        else => {},
+    };
+}
 
 fn formatDecoded(allocator: Allocator, items: []DecodedBencode) ![]const u8 {
     var result = std.ArrayList(u8).init(allocator);
@@ -55,7 +66,9 @@ fn formatDecoded(allocator: Allocator, items: []DecodedBencode) ![]const u8 {
                 const fmt = try formatDecoded(allocator, inner_items[i .. i + 1]);
                 defer allocator.free(fmt);
                 _ = try writer.write(fmt);
-                _ = try writer.write(",");
+                if (i != inner_items.len - 1) {
+                    _ = try writer.write(",");
+                }
             }
             _ = try writer.write("]");
         },
@@ -84,33 +97,42 @@ fn findMatchingTerminator(target_str: []const u8) !usize {
     return i;
 }
 
-fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !std.ArrayList(DecodedBencode) {
+const Decoded = struct {
+    list: []DecodedBencode,
+    end_pos: usize,
+};
+
+fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !Decoded {
     var i: usize = 0;
     var result = std.ArrayList(DecodedBencode).init(allocator);
+    defer result.deinit();
     while (i < encodedValue.len) {
-        const undecoded_str = encodedValue[i..];
-        switch (undecoded_str[0]) {
+        const undecoded_slice = encodedValue[i..];
+        switch (undecoded_slice[0]) {
             '0'...'9' => {
-                const first_colon = std.mem.indexOf(u8, undecoded_str, ":") orelse return error.InvalidArgument;
+                const first_colon = std.mem.indexOf(u8, undecoded_slice, ":") orelse return error.InvalidArgument;
                 // skip colon
-                const rest_slice = undecoded_str[first_colon + 1 ..];
-                const str_len = try std.fmt.parseInt(usize, undecoded_str[0..first_colon], 10);
+                const rest_slice = undecoded_slice[first_colon + 1 ..];
+                const str_len = try std.fmt.parseInt(usize, undecoded_slice[0..first_colon], 10);
                 try result.append(.{ .String = rest_slice[0..str_len] });
                 i += first_colon + 1 + str_len;
             },
             'i' => {
-                // skip first char
-                const rest_slice = undecoded_str[1..];
-                const end_pos = try findMatchingTerminator(rest_slice);
-                try result.append(.{ .Int = try std.fmt.parseInt(i64, rest_slice[0..end_pos], 10) });
-                i += 1 + end_pos + 1;
+                const end_pos = std.mem.indexOfScalar(u8, undecoded_slice, 'e') orelse return error.InvalidArgument;
+                const int = std.fmt.parseInt(i64, undecoded_slice[1..end_pos], 10) catch return error.InvalidArgument;
+                try result.append(.{ .Int = int });
+                i += end_pos + 1;
             },
             'l' => {
-                const str = undecoded_str[1..];
-                const end_pos = try findMatchingTerminator(str);
-                const decoded = try decodeBencode(allocator, str[0..end_pos]);
-                try result.append(.{ .Array = try allocator.dupe(DecodedBencode, decoded.items) });
-                i += 1 + end_pos + 1;
+                const str = undecoded_slice[1..];
+                const decoded = try decodeBencode(allocator, str);
+                defer allocator.free(decoded.list);
+                try result.append(.{ .Array = try allocator.dupe(DecodedBencode, decoded.list) });
+                i += decoded.end_pos + 1;
+            },
+            'e' => {
+                i += 1;
+                break;
             },
             else => {
                 try stdout.print("Not Supported data type.\n", .{});
@@ -118,7 +140,10 @@ fn decodeBencode(allocator: Allocator, encodedValue: []const u8) !std.ArrayList(
             },
         }
     }
-    return result;
+    return .{
+        .list = try allocator.dupe(DecodedBencode, result.items),
+        .end_pos = i,
+    };
 }
 
 test "should match right terminator" {
@@ -156,18 +181,24 @@ test "should decode int" {
 }
 
 test "should decode array" {
-    // const allocator = testing.allocator;
-    // const str_1 = "le";
-    // const str_2 = "l5:grapei935ee";
-    // var decoded_1 = try Bencode.initFromEncoded(allocator, str_1);
-    // var decoded_2 = try Bencode.initFromEncoded(allocator, str_2);
-    // defer decoded_1.deinit();
-    // defer decoded_2.deinit();
-    //
-    // const fmt_1 = try formatDecoded(allocator, decoded_1.decoded);
-    // const fmt_2 = try formatDecoded(allocator, decoded_2.decoded);
-    // allocator.free(fmt_1);
-    // allocator.free(fmt_2);
-    // try testing.expectEqualStrings("[]", fmt_1);
-    // try testing.expectEqualStrings("[\"grape\",935]", fmt_2);
+    const allocator = testing.allocator;
+    const str_1 = "le";
+    const str_2 = "l5:grapei935ee";
+    const str_3 = "lli972e9:blueberryee";
+    var decoded_1 = try Bencode.initFromEncoded(allocator, str_1);
+    var decoded_2 = try Bencode.initFromEncoded(allocator, str_2);
+    var decoded_3 = try Bencode.initFromEncoded(allocator, str_3);
+    defer decoded_1.deinit();
+    defer decoded_2.deinit();
+    defer decoded_3.deinit();
+
+    const fmt_1 = try formatDecoded(allocator, decoded_1.decoded);
+    const fmt_2 = try formatDecoded(allocator, decoded_2.decoded);
+    const fmt_3 = try formatDecoded(allocator, decoded_3.decoded);
+    defer allocator.free(fmt_1);
+    defer allocator.free(fmt_2);
+    defer allocator.free(fmt_3);
+    try testing.expectEqualStrings("[]", fmt_1);
+    try testing.expectEqualStrings("[\"grape\",935]", fmt_2);
+    try testing.expectEqualStrings("[[972,\"blueberry\"]]", fmt_3);
 }
