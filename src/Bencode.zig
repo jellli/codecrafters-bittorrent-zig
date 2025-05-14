@@ -14,9 +14,8 @@ pub const BencodeDecoder = struct {
 
     pub fn initFromEncoded(allocator: Allocator, encoded: []const u8) !BencodeDecoder {
         const decoded = try decodeBencode(allocator, encoded);
-        defer allocator.free(decoded.values);
 
-        return .{ .allocator = allocator, .decoded = try allocator.dupe(BencodeValue, decoded.values) };
+        return .{ .allocator = allocator, .decoded = decoded.values };
     }
 
     pub fn printDecoded(self: *BencodeDecoder) !void {
@@ -44,10 +43,8 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
         switch (undecoded_slice[0]) {
             '0'...'9' => {
                 const first_colon = std.mem.indexOf(u8, undecoded_slice, ":") orelse return error.InvalidArgument;
-                // skip colon
-                const rest_slice = undecoded_slice[first_colon + 1 ..];
-                const str_len = try std.fmt.parseInt(usize, undecoded_slice[0..first_colon], 10);
-                try result.append(.{ .String = rest_slice[0..str_len] });
+                const str_len = std.fmt.parseInt(usize, undecoded_slice[0..first_colon], 10) catch return error.InvalidArgument;
+                try result.append(.{ .String = undecoded_slice[first_colon + 1 .. first_colon + 1 + str_len] });
                 i += first_colon + 1 + str_len;
             },
             'i' => {
@@ -90,37 +87,24 @@ fn freeBencodeValues(allocator: Allocator, list: []BencodeValue) void {
 }
 
 fn formatBencodeValues(allocator: Allocator, items: []BencodeValue) ![]const u8 {
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-    const writer = result.writer();
-    for (items) |item| switch (item) {
-        .String => |stringValue| {
-            var string = std.ArrayList(u8).init(allocator);
-            try std.json.stringify(stringValue, .{}, string.writer());
-            const jsonStr = try string.toOwnedSlice();
-            defer allocator.free(jsonStr);
-            _ = try writer.write(jsonStr);
-        },
-        .Int => |intValue| {
-            const fmt = try std.fmt.allocPrint(allocator, "{d}", .{intValue});
-            defer allocator.free(fmt);
-            _ = try writer.write(fmt);
-        },
-        .Array => |inner_items| {
-            _ = try writer.write("[");
-            var i: usize = 0;
-            while (i < inner_items.len) : (i += 1) {
-                const fmt = try formatBencodeValues(allocator, inner_items[i .. i + 1]);
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+    for (items, 0..) |item, index| {
+        switch (item) {
+            .String => |s| try writer.print("\"{s}\"", .{s}),
+            .Int => |v| try writer.print("{d}", .{v}),
+            .Array => |inner_items| {
+                const fmt = try formatBencodeValues(allocator, inner_items);
                 defer allocator.free(fmt);
-                _ = try writer.write(fmt);
-                if (i != inner_items.len - 1) {
-                    _ = try writer.write(",");
-                }
-            }
-            _ = try writer.write("]");
-        },
-    };
-    return try allocator.dupe(u8, result.items);
+                try writer.print("[{s}]", .{fmt});
+            },
+        }
+        if (index != items.len - 1) {
+            try writer.writeByte(',');
+        }
+    }
+    return buffer.toOwnedSlice();
 }
 
 test "should decode string" {
