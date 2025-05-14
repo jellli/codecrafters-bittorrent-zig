@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const stdout = std.io.getStdOut().writer();
-const Bencode = @import("Bencode.zig").Bencode;
+const BencodeDecoder = @import("Bencode.zig").BencodeDecoder;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}).init;
@@ -22,7 +22,7 @@ pub fn main() !void {
         std.debug.print("Logs from your program will appear here\n", .{});
         const encodedStr = try allocator.dupe(u8, args[2]);
         defer allocator.free(encodedStr);
-        var bencode = try Bencode.initFromEncoded(allocator, encodedStr);
+        var bencode = try BencodeDecoder.initFromEncoded(allocator, encodedStr);
         defer bencode.deinit();
 
         try bencode.printDecoded();
