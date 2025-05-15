@@ -36,18 +36,22 @@ pub const BencodeDecoder = struct {
     }
 
     pub fn printInfo(self: *BencodeDecoder) !void {
-        var announce: []const u8 = undefined;
-        var length: i64 = undefined;
         for (self.decoded) |value| {
-            switch (value) {
-                .Dict => |dict| {
-                    announce = dict.get("announce").?.String;
-                    length = dict.get("info").?.Dict.get("length").?.Int;
-                },
-                else => continue,
+            if (value == .Dict) {
+                const announce = value.Dict.get("announce").?.String;
+                const info = value.Dict.get("info").?;
+                const length = info.Dict.get("length").?.Int;
+
+                const encoded = try encodeBencode(self.allocator, info);
+                defer self.allocator.free(encoded);
+
+                var hash: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
+                std.crypto.hash.Sha1.hash(encoded, &hash, .{});
+
+                try stdout.print("Tracker URL: {s}\nLength: {d}\nInfo Hash: {s}", .{ announce, length, std.fmt.fmtSliceHexLower(&hash) });
+                break;
             }
         }
-        try stdout.print("Tracker URL: {s}\nLength: {d}", .{ announce, length });
     }
 
     pub fn deinit(self: *BencodeDecoder) void {
@@ -57,6 +61,42 @@ pub const BencodeDecoder = struct {
         self.allocator.free(self.decoded);
     }
 };
+
+fn encodeBencode(allocator: Allocator, target: BencodeValue) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+    switch (target) {
+        .String => |v| try writer.print("{d}:{s}", .{ v.len, v }),
+        .Int => |v| try writer.print("i{d}e", .{v}),
+        .Array => |array| {
+            try writer.writeByte('l');
+            for (array) |item| {
+                const encoded = try encodeBencode(allocator, item);
+                defer allocator.free(encoded);
+                try writer.print("{s}", .{encoded});
+            }
+            try writer.writeByte('e');
+        },
+        .Dict => |dict| {
+            std.mem.sort(DictMap, dict.list, {}, (struct {
+                pub fn lessThan(_: void, a: DictMap, b: DictMap) bool {
+                    return std.mem.lessThan(u8, a.key, b.key);
+                }
+            }).lessThan);
+
+            try writer.writeByte('d');
+            for (dict.list) |item| {
+                try writer.print("{d}:{s}", .{ item.key.len, item.key });
+                const encoded = try encodeBencode(allocator, item.value.*);
+                defer allocator.free(encoded);
+                try writer.print("{s}", .{encoded});
+            }
+            try writer.writeByte('e');
+        },
+    }
+    return try buffer.toOwnedSlice();
+}
 
 const BencodeParseResult = struct {
     values: []BencodeValue,
@@ -113,7 +153,7 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
         }
     }
     return .{
-        .values = try allocator.dupe(BencodeValue, buffer.items),
+        .values = try buffer.toOwnedSlice(),
         .bytes_consumed = i,
     };
 }
