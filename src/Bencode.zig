@@ -5,15 +5,16 @@ const stdout = std.io.getStdOut().writer();
 
 const DictMap = struct {
     key: []const u8,
-    value: []BencodeValue,
+    value: *BencodeValue,
 };
 const Dict = struct {
     list: []DictMap,
+    decoded: BencodeParseResult,
 
-    pub fn get(self: *const Dict, key: []const u8) ?[]BencodeValue {
+    pub fn get(self: *const Dict, key: []const u8) ?BencodeValue {
         return for (self.list) |item| {
             if (std.mem.eql(u8, key, item.key)) {
-                return item.value;
+                return item.value.*;
             }
         } else null;
     }
@@ -40,21 +41,8 @@ pub const BencodeDecoder = struct {
         for (self.decoded) |value| {
             switch (value) {
                 .Dict => |dict| {
-                    if (dict.get("announce")) |a| {
-                        announce = a[0].String;
-                    }
-                    if (dict.get("info")) |info_list| {
-                        for (info_list) |info_item| {
-                            switch (info_item) {
-                                .Dict => |info| {
-                                    if (info.get("length")) |l| {
-                                        length = l[0].Int;
-                                    }
-                                },
-                                else => {},
-                            }
-                        }
-                    }
+                    announce = dict.get("announce").?.String;
+                    length = dict.get("info").?.Dict.get("length").?.Int;
                 },
                 else => continue,
             }
@@ -63,7 +51,9 @@ pub const BencodeDecoder = struct {
     }
 
     pub fn deinit(self: *BencodeDecoder) void {
-        freeBencodeValues(self.allocator, self.decoded);
+        for (self.decoded) |item| {
+            freeBencodeValue(self.allocator, item);
+        }
         self.allocator.free(self.decoded);
     }
 };
@@ -100,17 +90,16 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
             'd' => {
                 const str = undecoded_slice[1..];
                 const decoded = try decodeBencode(allocator, str);
-                defer allocator.free(decoded.values);
                 var dict_buffer = std.ArrayList(DictMap).init(allocator);
                 defer dict_buffer.deinit();
                 var j: usize = 0;
                 while (j < decoded.values.len) : (j += 2) {
                     try dict_buffer.append(.{
                         .key = decoded.values[j].String,
-                        .value = try allocator.dupe(BencodeValue, decoded.values[j + 1 .. j + 2]),
+                        .value = &decoded.values[j + 1],
                     });
                 }
-                try buffer.append(.{ .Dict = .{ .list = try allocator.dupe(DictMap, dict_buffer.items) } });
+                try buffer.append(.{ .Dict = .{ .list = try allocator.dupe(DictMap, dict_buffer.items), .decoded = decoded } });
                 i += decoded.bytes_consumed + 1;
             },
             'e' => {
@@ -129,49 +118,61 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
     };
 }
 
-fn freeBencodeValues(allocator: Allocator, list: []BencodeValue) void {
-    for (list) |item| switch (item) {
-        .Array => {
-            freeBencodeValues(allocator, item.Array);
-            allocator.free(item.Array);
+fn freeBencodeValue(allocator: Allocator, value: BencodeValue) void {
+    switch (value) {
+        .Array => |list| {
+            for (list) |item| {
+                freeBencodeValue(allocator, item);
+            }
+            allocator.free(list);
         },
         .Dict => |dict| {
             for (dict.list) |pair| {
-                freeBencodeValues(allocator, pair.value);
-                allocator.free(pair.value);
+                freeBencodeValue(allocator, pair.value.*);
             }
             allocator.free(dict.list);
+            allocator.free(dict.decoded.values);
         },
         else => {},
-    };
+    }
 }
 
-fn formatBencodeValues(allocator: Allocator, list: []BencodeValue) ![]const u8 {
+fn formatValue(allocator: Allocator, value: BencodeValue) ![]const u8 {
+    var buffer = std.ArrayList(u8).init(allocator);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+    switch (value) {
+        .String => |s| try writer.print("\"{s}\"", .{s}),
+        .Int => |v| try writer.print("{d}", .{v}),
+        .Array => |inner_items| {
+            const fmt = try formatBencodeValues(allocator, inner_items);
+            defer allocator.free(fmt);
+            try writer.print("[{s}]", .{fmt});
+        },
+        .Dict => |dict_list| {
+            try writer.writeByte('{');
+            for (dict_list.list, 0..) |dict, i| {
+                const fmt = try formatValue(allocator, dict.value.*);
+                defer allocator.free(fmt);
+                try writer.print("\"{s}\":{s}", .{ dict.key, fmt });
+                if (i != dict_list.list.len - 1) {
+                    try writer.writeByte(',');
+                }
+            }
+            try writer.writeByte('}');
+        },
+    }
+    return buffer.toOwnedSlice();
+}
+
+fn formatBencodeValues(allocator: Allocator, list: []BencodeValue) error{OutOfMemory}![]const u8 {
     var buffer = std.ArrayList(u8).init(allocator);
     defer buffer.deinit();
     const writer = buffer.writer();
     for (list, 0..) |item, index| {
-        switch (item) {
-            .String => |s| try writer.print("\"{s}\"", .{s}),
-            .Int => |v| try writer.print("{d}", .{v}),
-            .Array => |inner_items| {
-                const fmt = try formatBencodeValues(allocator, inner_items);
-                defer allocator.free(fmt);
-                try writer.print("[{s}]", .{fmt});
-            },
-            .Dict => |dict_list| {
-                try writer.writeByte('{');
-                for (dict_list.list, 0..) |dict, i| {
-                    const fmt = try formatBencodeValues(allocator, dict.value);
-                    defer allocator.free(fmt);
-                    try writer.print("\"{s}\":{s}", .{ dict.key, fmt });
-                    if (i != dict_list.list.len - 1) {
-                        try writer.writeByte(',');
-                    }
-                }
-                try writer.writeByte('}');
-            },
-        }
+        const fmt = try formatValue(allocator, item);
+        defer allocator.free(fmt);
+        try writer.print("{s}", .{fmt});
         if (index != list.len - 1) {
             try writer.writeByte(',');
         }
@@ -230,21 +231,21 @@ test "should decode dict" {
     const allocator = testing.allocator;
     const str_1 = "de";
     const str_2 = "d5:grapei935ee";
-    // const str_3 = "dryee";
+    const str_3 = "d10:inner_dictd4:key16:value14:key2i42e8:list_keyl5:item15:item2i3eeee";
     var decoded_1 = try BencodeDecoder.initFromEncoded(allocator, str_1);
     var decoded_2 = try BencodeDecoder.initFromEncoded(allocator, str_2);
-    // var decoded_3 = try BencodeDecoder.initFromEncoded(allocator, str_3);
+    var decoded_3 = try BencodeDecoder.initFromEncoded(allocator, str_3);
     defer decoded_1.deinit();
     defer decoded_2.deinit();
-    // defer decoded_3.deinit();
+    defer decoded_3.deinit();
 
     const fmt_1 = try formatBencodeValues(allocator, decoded_1.decoded);
     const fmt_2 = try formatBencodeValues(allocator, decoded_2.decoded);
-    // const fmt_3 = try formatBencodeValues(allocator, decoded_3.decoded);
+    const fmt_3 = try formatBencodeValues(allocator, decoded_3.decoded);
     defer allocator.free(fmt_1);
     defer allocator.free(fmt_2);
-    // defer allocator.free(fmt_3);
+    defer allocator.free(fmt_3);
     try testing.expectEqualStrings("{}", fmt_1);
     try testing.expectEqualStrings("{\"grape\":935}", fmt_2);
-    // try testing.expectEqualStrings("[[972,\"blueberry\"]]", fmt_3);
+    try testing.expectEqualStrings("{\"inner_dict\":{\"key1\":\"value1\",\"key2\":42,\"list_key\":[\"item1\",\"item2\",3]}}", fmt_3);
 }
