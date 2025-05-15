@@ -3,11 +3,22 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const stdout = std.io.getStdOut().writer();
 
-const Dict = struct {
+const DictMap = struct {
     key: []const u8,
     value: []BencodeValue,
 };
-const BencodeValue = union(enum) { String: []const u8, Int: i64, Array: []BencodeValue, Dict: []Dict };
+const Dict = struct {
+    list: []DictMap,
+
+    pub fn get(self: *const Dict, key: []const u8) ?[]BencodeValue {
+        return for (self.list) |item| {
+            if (std.mem.eql(u8, key, item.key)) {
+                return item.value;
+            }
+        } else null;
+    }
+};
+const BencodeValue = union(enum) { String: []const u8, Int: i64, Array: []BencodeValue, Dict: Dict };
 pub const BencodeDecoder = struct {
     allocator: Allocator,
     decoded: []BencodeValue,
@@ -21,6 +32,34 @@ pub const BencodeDecoder = struct {
         const fmt = try formatBencodeValues(self.allocator, self.decoded);
         defer self.allocator.free(fmt);
         try stdout.print("{s}\n", .{fmt});
+    }
+
+    pub fn printInfo(self: *BencodeDecoder) !void {
+        var announce: []const u8 = undefined;
+        var length: i64 = undefined;
+        for (self.decoded) |value| {
+            switch (value) {
+                .Dict => |dict| {
+                    if (dict.get("announce")) |a| {
+                        announce = a[0].String;
+                    }
+                    if (dict.get("info")) |info_list| {
+                        for (info_list) |info_item| {
+                            switch (info_item) {
+                                .Dict => |info| {
+                                    if (info.get("length")) |l| {
+                                        length = l[0].Int;
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                },
+                else => continue,
+            }
+        }
+        try stdout.print("Tracker URL: {s}\nLength: {d}", .{ announce, length });
     }
 
     pub fn deinit(self: *BencodeDecoder) void {
@@ -62,7 +101,7 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
                 const str = undecoded_slice[1..];
                 const decoded = try decodeBencode(allocator, str);
                 defer allocator.free(decoded.values);
-                var dict_buffer = std.ArrayList(Dict).init(allocator);
+                var dict_buffer = std.ArrayList(DictMap).init(allocator);
                 defer dict_buffer.deinit();
                 var j: usize = 0;
                 while (j < decoded.values.len) : (j += 2) {
@@ -71,7 +110,7 @@ fn decodeBencode(allocator: Allocator, input: []const u8) !BencodeParseResult {
                         .value = try allocator.dupe(BencodeValue, decoded.values[j + 1 .. j + 2]),
                     });
                 }
-                try buffer.append(.{ .Dict = try allocator.dupe(Dict, dict_buffer.items) });
+                try buffer.append(.{ .Dict = .{ .list = try allocator.dupe(DictMap, dict_buffer.items) } });
                 i += decoded.bytes_consumed + 1;
             },
             'e' => {
@@ -96,12 +135,12 @@ fn freeBencodeValues(allocator: Allocator, list: []BencodeValue) void {
             freeBencodeValues(allocator, item.Array);
             allocator.free(item.Array);
         },
-        .Dict => {
-            for (item.Dict) |dict| {
-                freeBencodeValues(allocator, dict.value);
-                allocator.free(dict.value);
+        .Dict => |dict| {
+            for (dict.list) |pair| {
+                freeBencodeValues(allocator, pair.value);
+                allocator.free(pair.value);
             }
-            allocator.free(item.Dict);
+            allocator.free(dict.list);
         },
         else => {},
     };
@@ -122,11 +161,11 @@ fn formatBencodeValues(allocator: Allocator, list: []BencodeValue) ![]const u8 {
             },
             .Dict => |dict_list| {
                 try writer.writeByte('{');
-                for (dict_list, 0..) |dict, i| {
+                for (dict_list.list, 0..) |dict, i| {
                     const fmt = try formatBencodeValues(allocator, dict.value);
                     defer allocator.free(fmt);
                     try writer.print("\"{s}\":{s}", .{ dict.key, fmt });
-                    if (i != dict_list.len - 1) {
+                    if (i != dict_list.list.len - 1) {
                         try writer.writeByte(',');
                     }
                 }

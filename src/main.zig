@@ -26,4 +26,15 @@ pub fn main() !void {
 
         try bencode.printDecoded();
     }
+    if (std.mem.eql(u8, command, "info")) {
+        const path = args[2];
+        var buffer: [1024]u8 = undefined;
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+        const byte_read = try file.readAll(&buffer);
+        var bencode = try BencodeDecoder.initFromEncoded(allocator, buffer[0..byte_read]);
+        defer bencode.deinit();
+
+        try bencode.printInfo();
+    }
 }
