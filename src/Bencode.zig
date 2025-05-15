@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const Sha1 = std.crypto.hash.Sha1;
 const stdout = std.io.getStdOut().writer();
 
 const DictMap = struct {
@@ -41,14 +42,28 @@ pub const BencodeDecoder = struct {
                 const announce = value.Dict.get("announce").?.String;
                 const info = value.Dict.get("info").?;
                 const length = info.Dict.get("length").?.Int;
+                const piece_length = info.Dict.get("piece length").?.Int;
 
                 const encoded = try encodeBencode(self.allocator, info);
                 defer self.allocator.free(encoded);
 
-                var hash: [std.crypto.hash.Sha1.digest_length]u8 = undefined;
-                std.crypto.hash.Sha1.hash(encoded, &hash, .{});
+                const hash: [Sha1.digest_length]u8 = hashString(encoded);
 
-                try stdout.print("Tracker URL: {s}\nLength: {d}\nInfo Hash: {s}", .{ announce, length, std.fmt.fmtSliceHexLower(&hash) });
+                try stdout.print("Tracker URL: {s}\nLength: {d}\nInfo Hash: {s}\nPiece Length: {d}", .{
+                    announce,
+                    length,
+                    std.fmt.fmtSliceHexLower(&hash),
+                    piece_length,
+                });
+                if (info.Dict.get("pieces")) |piece| {
+                    try stdout.print("\nPiece Hashes\n", .{});
+                    var i: usize = 0;
+                    while (i < piece.String.len) : (i += 20) {
+                        try stdout.print("{s}\n", .{
+                            std.fmt.fmtSliceHexLower(piece.String[i .. i + 20]),
+                        });
+                    }
+                }
                 break;
             }
         }
@@ -61,6 +76,12 @@ pub const BencodeDecoder = struct {
         self.allocator.free(self.decoded);
     }
 };
+
+fn hashString(target: []const u8) [Sha1.digest_length]u8 {
+    var hash: [Sha1.digest_length]u8 = undefined;
+    Sha1.hash(target, &hash, .{});
+    return hash;
+}
 
 fn encodeBencode(allocator: Allocator, target: BencodeValue) ![]const u8 {
     var buffer = std.ArrayList(u8).init(allocator);
